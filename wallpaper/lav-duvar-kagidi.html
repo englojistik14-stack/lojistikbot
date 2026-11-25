@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lav Diyarı</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #120302; overflow: hidden; cursor: none; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// Özgün, prosedürel lav sahnesi. Harici dosya gerektirmez.
+// ?still=1 -> animasyonu durdurur (PNG almak için), ?t=12 -> sahnenin zamanı
+const params = new URLSearchParams(location.search);
+const STILL = params.has('still');
+const START_T = parseFloat(params.get('t') || '0');
+
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W, H, DPR, lava, lctx, LW, LH;
+
+// ---------- değer gürültüsü ----------
+const P = new Uint8Array(512);
+(() => { let s = 1337; const p = [...Array(256).keys()];
+  for (let i = 255; i > 0; i--) { s = (s * 16807) % 2147483647; const j = s % (i + 1); [p[i], p[j]] = [p[j], p[i]]; }
+  for (let i = 0; i < 512; i++) P[i] = p[i & 255]; })();
+const fade = t => t * t * (3 - 2 * t);
+function noise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+  const h = (a, b) => P[(P[(a & 255)] + (b & 255)) & 511] / 255;
+  const u = fade(xf), v = fade(yf);
+  const a = h(xi, yi), b = h(xi + 1, yi), c = h(xi, yi + 1), d = h(xi + 1, yi + 1);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+function fbm(x, y) { let v = 0, a = .5; for (let i = 0; i < 4; i++) { v += a * noise(x, y); x *= 2.03; y *= 2.03; a *= .5; } return v; }
+
+// lav renk rampası
+const RAMP = [[0,[20,2,2]],[.35,[90,10,4]],[.55,[190,40,6]],[.7,[245,110,15]],[.85,[255,190,60]],[1,[255,245,200]]];
+function ramp(t) {
+  t = Math.max(0, Math.min(1, t));
+  for (let i = 1; i < RAMP.length; i++) if (t <= RAMP[i][0]) {
+    const [t0, c0] = RAMP[i-1], [t1, c1] = RAMP[i], k = (t - t0) / (t1 - t0);
+    return [c0[0]+(c1[0]-c0[0])*k, c0[1]+(c1[1]-c0[1])*k, c0[2]+(c1[2]-c0[2])*k];
+  }
+  return RAMP[RAMP.length-1][1];
+}
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = cv.width = Math.floor(innerWidth * DPR); H = cv.height = Math.floor(innerHeight * DPR);
+  LW = 240; LH = Math.round(LW * 0.45);
+  lava = document.createElement('canvas'); lava.width = LW; lava.height = LH; lctx = lava.getContext('2d');
+}
+addEventListener('resize', resize); resize();
+
+// ---------- lav gölü (perspektifli akış) ----------
+function drawLava(t) {
+  const img = lctx.createImageData(LW, LH), d = img.data;
+  for (let y = 0; y < LH; y++) {
+    const depth = 1 + (1 - y / LH) * 5;            // ufka doğru sıkışma
+    for (let x = 0; x < LW; x++) {
+      const nx = (x / LW - .5) * depth * 3, ny = depth * 1.2 + t * .08;
+      const warp = fbm(nx * .8 + t * .05, ny * .8);
+      let n = fbm(nx + warp * 1.6, ny + warp * 1.2 - t * .12);
+      const crust = Math.pow(Math.abs(n - .5) * 2, .6);  // çatlak = sıcak
+      let heat = 1 - crust * .9 + .18 * Math.sin(t * .7 + nx * 2 + ny);
+      heat = heat * .75 + (1 - y / LH) * .35;            // uzak = parlak sis
+      const [r, g, b] = ramp(heat);
+      const i = (y * LW + x) * 4; d[i] = r; d[i+1] = g; d[i+2] = b; d[i+3] = 255;
+    }
+  }
+  lctx.putImageData(img, 0, 0);
+  const top = H * .5;
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(lava, 0, top, W, H - top);
+  const hz = ctx.createLinearGradient(0, top - H * .08, 0, top + H * .1);
+  hz.addColorStop(0, 'rgba(255,170,80,0)'); hz.addColorStop(.45, 'rgba(255,200,130,.85)'); hz.addColorStop(1, 'rgba(255,170,80,0)');
+  ctx.fillStyle = hz; ctx.fillRect(0, top - H * .08, W, H * .18);
+}
+
+// ---------- arka plan: kızgın kaya duvarları ve sis ----------
+function drawSky(t) {
+  const g = ctx.createLinearGradient(0, 0, 0, H * .6);
+  g.addColorStop(0, '#2a0703'); g.addColorStop(.55, '#a8320b'); g.addColorStop(1, '#ffb347');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H * .6);
+}
+function cliff(side, t) {
+  ctx.save();
+  ctx.beginPath();
+  const dir = side === 'L' ? 1 : -1, x0 = side === 'L' ? 0 : W;
+  ctx.moveTo(x0, 0);
+  for (let i = 0; i <= 40; i++) {
+    const y = i / 40 * H * .62;
+    const w = (side === 'L' ? .30 : .24) * W * (1 - i / 55) + noise(i * .4, side === 'L' ? 3 : 9) * W * .06;
+    ctx.lineTo(x0 + dir * w, y);
+  }
+  ctx.lineTo(x0, H * .62); ctx.closePath();
+  const g = ctx.createLinearGradient(x0, 0, x0 + dir * W * .3, 0);
+  g.addColorStop(0, '#1a0402'); g.addColorStop(1, '#6b1906');
+  ctx.fillStyle = g; ctx.fill(); ctx.clip();
+  // duvardan süzülen lav damarları
+  ctx.globalCompositeOperation = 'lighter';
+  for (let k = 0; k < 7; k++) {
+    const bx = x0 + dir * W * (.03 + k * .035), wob = Math.sin(t * .6 + k) * 6 * DPR;
+    const g2 = ctx.createLinearGradient(0, 0, 0, H * .6);
+    g2.addColorStop(0, 'rgba(255,120,20,0)'); g2.addColorStop(.6, 'rgba(255,140,30,.35)'); g2.addColorStop(1, 'rgba(255,200,90,.6)');
+    ctx.strokeStyle = g2; ctx.lineWidth = (2 + (k % 3) * 2) * DPR; ctx.beginPath();
+    for (let y = 0; y < H * .62; y += 8 * DPR) ctx.lineTo(bx + noise(k * 3, y / (60 * DPR)) * 30 * DPR + wob, y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// ---------- lav fışkırmaları (parçacık) ----------
+const fountains = [{x:.72,s:1.0,y:.60},{x:.81,s:.8,y:.58},{x:.64,s:.55,y:.56},{x:.90,s:.6,y:.62},{x:.16,s:.5,y:.60},{x:.28,s:.35,y:.55}];
+let drops = [];
+function spawn(t, dt) {
+  for (const f of fountains) {
+    const pulse = .55 + .45 * Math.sin(t * (.8 + f.s * .3) + f.x * 20);
+    const n = Math.floor(900 * f.s * pulse * dt);
+    for (let i = 0; i < n; i++) drops.push({
+      x: f.x * W + (Math.random() - .5) * 40 * DPR * f.s, y: f.y * H, by: f.y * H,
+      vx: (Math.random() - .5) * 160 * DPR * f.s,
+      vy: -(300 + Math.random() * 520) * DPR * f.s * (.6 + .4 * pulse) * H / (1080 * DPR) * DPR,
+      life: 0, max: 1.4 + Math.random() * 1.4, r: (2 + Math.random() * 5) * DPR * f.s
+    });
+  }
+}
+function drawDrops(dt) {
+  ctx.globalCompositeOperation = 'lighter';
+  const next = [];
+  for (const p of drops) {
+    const px = p.x, py = p.y;
+    p.life += dt; p.vy += 420 * DPR * dt; p.x += p.vx * dt; p.y += p.vy * dt;
+    if (p.life > p.max || p.y > p.by + 4) continue;
+    const k = 1 - p.life / p.max, [r, g, b] = ramp(.62 + k * .38);
+    ctx.strokeStyle = `rgba(${r|0},${g|0},${b|0},${.25 + k * .55})`;
+    ctx.lineWidth = p.r * (0.5 + k); ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(px - p.vx * .03, py - p.vy * .03); ctx.lineTo(p.x, p.y); ctx.stroke();
+    next.push(p);
+  }
+  drops = next.length > 9000 ? next.slice(-9000) : next;
+  // fışkırma tabanındaki parıltı
+  for (const f of fountains) {
+    const fx = f.x * W, fy = f.y * H, R = H * .28 * f.s;
+    ctx.save(); ctx.translate(fx, fy); ctx.scale(.45, 1);
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, R);
+    g.addColorStop(0, 'rgba(255,245,210,.85)'); g.addColorStop(.35, 'rgba(255,190,90,.35)'); g.addColorStop(1, 'rgba(255,110,20,0)');
+    ctx.fillStyle = g; ctx.fillRect(-R, -R, 2 * R, 2 * R); ctx.restore();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+// ---------- yükselen közler ----------
+const embers = Array.from({length: 260}, () => ({x: Math.random(), y: Math.random(), s: Math.random(), ph: Math.random() * 6}));
+function drawEmbers(t, dt) {
+  ctx.globalCompositeOperation = 'lighter';
+  for (const e of embers) {
+    e.y -= (0.02 + e.s * .05) * dt; if (e.y < -.05) { e.y = 1.05; e.x = Math.random(); }
+    const x = (e.x + Math.sin(t * .5 + e.ph) * .01) * W, y = e.y * H;
+    const fl = .5 + .5 * Math.sin(t * 6 + e.ph * 5);
+    ctx.fillStyle = `rgba(255,${150 + 80 * e.s | 0},60,${.25 + .5 * fl * e.s})`;
+    ctx.beginPath(); ctx.arc(x, y, (0.6 + e.s * 1.8) * DPR, 0, 7); ctx.fill();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+// ---------- ön plan: kaya ve siluet ----------
+function drawRockAndFigure(t) {
+  const cx = W * .46, base = H, top = H * .80;
+  ctx.fillStyle = '#0e0302';
+  ctx.beginPath(); ctx.moveTo(W * .26, base);
+  for (let i = 0; i <= 30; i++) {
+    const a = i / 30, x = W * .26 + a * W * .40;
+    const y = top + Math.pow(Math.abs(a - .48) * 2, 1.6) * (base - top) * .9 - noise(i * .7, 2) * 18 * DPR;
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(W * .66, base); ctx.closePath(); ctx.fill();
+  // kaya kenarındaki kızıl yansıma
+  ctx.strokeStyle = 'rgba(255,110,30,.35)'; ctx.lineWidth = 2 * DPR; ctx.stroke();
+
+  // siluet (genel, isimsiz figür) - ölçek ekran yüksekliğine göre
+  const s = H / 1000, fx = cx, fy = top - 4 * s * DPR / DPR;
+  const sway = Math.sin(t * .8) * 1.5 * s;
+  ctx.save(); ctx.translate(fx, fy); ctx.scale(s, s); ctx.fillStyle = '#080101';
+  ctx.beginPath();                         // bacaklar
+  ctx.moveTo(-14, 0); ctx.lineTo(-9, -70); ctx.lineTo(-2, -70); ctx.lineTo(-4, 0); ctx.closePath();
+  ctx.moveTo(4, 0); ctx.lineTo(3, -70); ctx.lineTo(10, -70); ctx.lineTo(15, 0); ctx.closePath(); ctx.fill();
+  ctx.beginPath();                         // pelerin / gövde
+  ctx.moveTo(-24 + sway * 2, -40); ctx.quadraticCurveTo(-22 + sway, -100, -13, -142);
+  ctx.lineTo(14, -142); ctx.quadraticCurveTo(22 + sway, -100, 26 + sway * 2, -44);
+  ctx.quadraticCurveTo(0, -36, -24 + sway * 2, -40); ctx.closePath(); ctx.fill();
+  ctx.shadowColor = 'rgba(255,140,40,.9)'; ctx.shadowBlur = 14;
+  ctx.beginPath(); ctx.ellipse(0, -154, 9, 11, 0, 0, 7); ctx.fill();   // baş
+  ctx.beginPath(); ctx.moveTo(-9, -158); ctx.quadraticCurveTo(-14, -130, -10 + sway, -118);  // saç
+  ctx.lineTo(-4, -125); ctx.closePath(); ctx.fill();
+  ctx.lineCap = 'round'; ctx.strokeStyle = '#080101';
+  ctx.lineWidth = 8; ctx.beginPath(); ctx.moveTo(10, -134); ctx.lineTo(24, -168); ctx.lineTo(27, -200); ctx.stroke(); // kalkık kol
+  ctx.lineWidth = 7; ctx.beginPath(); ctx.moveTo(-11, -132); ctx.lineTo(-17, -100); ctx.lineTo(-15, -78); ctx.stroke();
+  ctx.beginPath(); ctx.arc(27, -206, 5, 0, 7); ctx.fill();               // el
+  // eldeki küçük parıltı
+  const glow = .6 + .4 * Math.sin(t * 2.2);
+  const gg = ctx.createRadialGradient(27, -208, 0, 27, -208, 40);
+  gg.addColorStop(0, `rgba(255,245,210,${.9 * glow})`); gg.addColorStop(1, 'rgba(255,180,80,0)');
+  ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = gg; ctx.fillRect(-20, -260, 100, 100);
+  ctx.restore(); ctx.globalCompositeOperation = 'source-over';
+}
+
+// ---------- atmosfer ----------
+function drawAtmosphere(t) {
+  ctx.globalCompositeOperation = 'screen';
+  const g = ctx.createLinearGradient(0, H * .35, 0, H * .7);
+  g.addColorStop(0, 'rgba(255,170,90,0)'); g.addColorStop(.6, `rgba(255,190,120,${.22 + .05 * Math.sin(t * .4)})`); g.addColorStop(1, 'rgba(255,120,40,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'source-over';
+  const v = ctx.createRadialGradient(W / 2, H * .55, H * .2, W / 2, H * .55, H * 1.0);
+  v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(10,0,0,.75)');
+  ctx.fillStyle = v; ctx.fillRect(0, 0, W, H);
+}
+
+// ---------- döngü ----------
+let last = performance.now(), T = START_T;
+function frame(now) {
+  const dt = Math.min(.05, (now - last) / 1000); last = now; if (!STILL) T += dt;
+  drawSky(T); cliff('L', T); cliff('R', T); drawLava(T);
+  if (!STILL) spawn(T, dt); drawDrops(STILL ? 0 : dt); drawEmbers(T, STILL ? 0 : dt);
+  drawRockAndFigure(T); drawAtmosphere(T);
+  if (!STILL) requestAnimationFrame(frame);
+}
+if (STILL) { // durgun kare için parçacıkları önceden simüle et
+  for (let i = 0; i < 120; i++) { spawn(START_T - 2 + i / 60, 1 / 60); drawDropsSim(1 / 60); }
+  frame(performance.now());
+} else requestAnimationFrame(frame);
+function drawDropsSim(dt) { for (const p of drops) { p.life += dt; p.vy += 420 * DPR * dt; p.x += p.vx * dt; p.y += p.vy * dt; } drops = drops.filter(p => p.life < p.max && p.y < p.by + 4); }
+</script>
+</body>
+</html>
