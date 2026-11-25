@@ -131,6 +131,66 @@ Sekmeler: **Giden faturalar** (müşteri), **Gelen faturalar** (nakliyeci), **Ta
 
 ---
 
+## 3A. Detay: WhatsApp talep paylaşımı ve nakliyeci fiyatlarının toplanması
+
+> Özet: Fiyatlar **otomatik toplanmıyor**. Nakliyeciden WhatsApp DM ile gelen her mesajı operasyon personeli panele **elle yapıştırıyor**; panel metinden fiyatı ve notu ayrıştırıp talebe ekliyor.
+
+### Adım 1 – Talep gelir (durum: `Yeni`)
+- Müşteri e-postası (Outlook/Gmail) okunur ya da "Yeni talep" ile metin yapıştırılır.
+- Ayrıştırıcı şunları çıkarır: müşteri, yükleme yeri, teslim yeri, yük cinsi, palet, kg, yükleme tarihi ("cuma", "yarın", "27 kasım", "27.11" gibi ifadeler dahil).
+
+### Adım 2 – WhatsApp gruplarında paylaşım (durum: `Gruplarda`)
+- "Gruplarda paylaş" butonu hazır ilan metnini üretir:
+  ```
+  🚚 *YÜK VAR* - YT-1088
+  📍 İstanbul / Esenyurt ➜ Münih, DE
+  📦 Kumaş topu · 4 palet · 950 kg
+  📅 Yükleme: 27 Kasım Cuma
+  Fiyat ve araç bilgisini DM atınız 🙏
+  ```
+- Buton yalnızca `https://wa.me/?text=...` linkini açar. **Grubu kullanıcı kendi WhatsApp'ında seçer**; API yok, gruplara otomatik gönderim yok. Ayarlardaki grup listesi ("Avrupa Parsiyel Yük", "Balkan Van Grubu", "Trakya Nakliyeciler") yalnızca bilgi amaçlı gösteriliyor.
+- Talep durumu `Gruplarda` olur, paylaşım zamanı (`sharedAt`) kaydedilir.
+
+### Adım 3 – Nakliyeci fiyatının eklenmesi ("DM fiyatı ekle" penceresi)
+Nakliyeci özelden yazar, ör. *"Abi 2.100 EUR crafter cuma"*. Operasyon personeli:
+1. **Nakliyeciyi seçer** (Firmalar → Nakliyeciler listesinden).
+2. Mesajı **"Gelen mesaj"** kutusuna yapıştırır.
+3. Ayrıştırıcı alanları otomatik doldurur:
+
+| Alan | Kural |
+|---|---|
+| Fiyat | "2.100 EUR", "€2100", "2,1 bin euro", "1950 TL", "$1800" gibi biçimleri tanır; binlik ayırıcı nokta/boşluk, ondalık virgül, "bin" çarpanı desteklenir. Para birimi yazılmamışsa kg/ton/palet/adet/gün/saat olmayan ve **100'den büyük ilk sayı** fiyat kabul edilir. |
+| Para birimi | `€ / eur / euro / avro / eu` → EUR · `₺ / tl / try / lira` → TRY · `$ / usd / dolar` → USD |
+| Not | Fiyat ifadesi çıkarılır; "merhaba, selam, abi, hocam, kardeşim, fiyatımız, olur, veririz, yaparız, teklifimiz, net, son, +kdv, dahil, hariç, teşekkürler, kolay gelsin, iyi çalışmalar" gibi kalıplar silinir; kalan metin not olur (örnekte: "Crafter cuma"). |
+| Kaynak etiketi | Her alanın yanında `ayrıştırıcı` / `yapay zekâ` / `kullanıcı` gösterilir. Ayarlarda yapay zekâ açıksa okunamayan alanları o tamamlar. |
+
+4. Para birimi EUR değilse uyarı: *"Teklifler EUR ile karşılaştırılır. Tutarı EUR'ya çevirip girin ve para birimini EUR seçin."* → **Kur dönüşümü elle yapılıyor.**
+5. Kayıt: `quotes[] += {carrier, price, at, note}`
+   - **Para birimi kaydedilmiyor** (tüm fiyatlar EUR varsayılıyor).
+   - **Aynı nakliyeci yeniden fiyat verirse eski teklif siliniyor** ("Bu nakliyecinin önceki teklifi bununla değişir") → pazarlık/fiyat geçmişi tutulmuyor.
+   - Talep hâlâ `Yeni` ise otomatik `Gruplarda` durumuna geçer.
+   - Mesajın ham metni teklif kaydına yazılmıyor.
+
+### Adım 4 – Karşılaştırma ve müşteri teklifi (durum: `Teklif verildi`)
+- Teklifler ucuzdan pahalıya sıralanır; **en düşük fiyat "En uygun" etiketiyle otomatik seçilir**, istenirse başka nakliyeci seçilebilir.
+- Müşteri fiyatı: **seçilen nakliyeci fiyatı × (1 + marj%) → 10'a yukarı yuvarla**
+  - Örnek: 1.890 € × 1,15 = 2.173,5 → **2.180 €**
+  - Varsayılan marj %15; marj <%0 veya >%100 engellenir; varsayılanın yarısının (%7,5) altı uyarı verir.
+- Teklif e-postası şablondan gelir (güzergâh, yük, yükleme tarihi, EUR fiyat, KDV hariç, 3 iş günü geçerli), gönderimden önce düzenlenebilir. Marj, seçilen nakliyeci ve teklif zamanı kaydedilir.
+
+### Adım 5 – Onay (durum: `Onaylandı`)
+- "Onaylandı, sefer aç" → talep `SF-xxxxx` sefere dönüşür; seferde `loadRef` olarak talep numarası, adresler, yük, satış ve maliyet taşınır.
+
+### Değerlendirme ve ENG TMS önerisi
+| | |
+|---|---|
+| **Güçlü yan** | WhatsApp API / Meta onayı / ücret gerektirmez; mevcut çalışma alışkanlığı bozulmaz, sadece kopyala-yapıştır + otomatik fiyat okuma. |
+| **Zayıf yan** | Toplama elle; fiyat geçmişi üzerine yazılıyor; para birimi ve kur saklanmıyor; ham mesaj saklanmıyor; teklif sayısı/yanıt süresi gibi nakliyeci metrikleri çıkarılamıyor. |
+| **TMS'te olması gereken** | Her teklif ayrı satır: `carrier_quote(id, load_request_id, carrier_id, price, currency, fx_rate, price_eur, raw_message, note, vehicle, available_date, received_at, entered_by, source[parser/ai/user], is_selected)`. Böylece hat bazlı fiyat benchmark'ı, nakliyeci yanıt süresi ve kazanma oranı raporlanabilir. |
+| **İleri adım (opsiyonel)** | Otomatik toplama isteniyorsa WhatsApp Business API veya grup/DM mesajlarını okuyan bir bot entegrasyonu ayrıca değerlendirilmeli. |
+
+---
+
 ## 4. ENG TMS'e aktarılacak değerli alanlar
 
 > Not: Bu oturumdaki `lojistikbot` deposu boş olduğu için ENG TMS'in mevcut veri şemasıyla birebir karşılaştırma yapılamadı. Aşağıdaki liste "TMS'te yoksa eklenmeli" önerisidir; mevcut şemayı paylaşırsanız boşluk analizini netleştirebilirim.
